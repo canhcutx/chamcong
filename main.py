@@ -32,6 +32,7 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
 
+# Mở tệp Google Sheet
 sheet = client.open("Chấm công NPC").sheet1
 
 # --- CẤU HÌNH BOT DISCORD ---
@@ -39,9 +40,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Dictionary lưu tạm các ca đang làm việc
 active_sessions = {}
 
-# (Giữ nguyên đoạn def save_to_sheet và các phần bên dưới)
 def save_to_sheet(user_id, user_name, date_str, start_time, end_time, hours):
     """Hàm ghi 1 hàng mới vào Google Sheets"""
     sheet.append_row([
@@ -52,6 +53,25 @@ def save_to_sheet(user_id, user_name, date_str, start_time, end_time, hours):
         end_time,
         hours
     ])
+
+def get_user_total_hours(user_id):
+    """Hàm đọc dữ liệu từ Google Sheet và tính tổng số giờ của 1 user"""
+    records = sheet.get_all_records()
+    total_hours = 0.0
+    user_records = []
+
+    for row in records:
+        # Cột 'User ID' trên Google Sheet (đối chiếu dạng string)
+        if str(row.get("User ID")) == str(user_id):
+            try:
+                hours_val = str(row.get("Tổng Giờ", 0)).replace(",", ".")
+                hours = float(hours_val)
+                total_hours += hours
+                user_records.append(row)
+            except ValueError:
+                continue
+
+    return total_hours, user_records
 
 # --- MODAL BÁO ONLINE ---
 class CheckInModal(ui.Modal, title="Báo giờ Online"):
@@ -156,6 +176,7 @@ class TimekeepingView(ui.View):
                 msg += f"- 👤 **{info['name']}** (Online từ lúc `{info['start_time']}`)\n"
             await interaction.response.send_message(msg, ephemeral=True)
 
+# --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG (PREFIX) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup_bot(ctx):
@@ -171,10 +192,51 @@ async def setup_bot(ctx):
     )
     await ctx.send(embed=embed, view=TimekeepingView())
 
+# --- LỆNH TRA CỨU DÀNH CHO ADMIN (SLASH COMMAND /tracuu @tênthànhviên) ---
+@bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ chấm công của 1 thành viên bất kỳ")
+@app_commands.checks.has_permissions(administrator=True)
+async def tracuu(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        total_hours, user_records = get_user_total_hours(member.id)
+
+        if not user_records:
+            await interaction.followup.send(
+                f"❌ Chưa có dữ liệu chấm công nào trên Google Sheet cho thành viên **{member.display_name}**.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📊 Báo Cáo Chấm Công: {member.display_name}",
+            color=discord.Color.green()
+        )
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+
+        embed.add_field(name="👤 Thành viên", value=member.mention, inline=True)
+        embed.add_field(name="📅 Số buổi làm", value=f"`{len(user_records)} buổi`", inline=True)
+        embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours} giờ**", inline=False)
+
+        # Hiển thị tối đa 3 lần chấm công gần nhất
+        recent_str = ""
+        for r in user_records[-3:]:
+            recent_str += f"• `{r.get('Ngày')}`: {r.get('Giờ On')} ➔ {r.get('Giờ Off')} (**{r.get('Tổng Giờ')}h**)\n"
+        
+        embed.add_field(name="📝 Ca làm gần đây", value=recent_str or "Không có", inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Đã xảy ra lỗi khi đọc Google Sheet: {e}", ephemeral=True)
+
+# --- SỰ KIỆN KHỞI ĐỘNG BOT ---
 @bot.event
 async def on_ready():
     bot.add_view(TimekeepingView())
-    print(f"Bot {bot.user.name} đã kết nối và sẵn sàng làm việc!")
+    await bot.tree.sync() # Đồng bộ lệnh Slash Command (/tracuu)
+    print(f"Bot {bot.user.name} đã kết nối và đồng bộ lệnh thành công!")
 
 # Lấy Token từ biến môi trường của Render
 token = os.getenv("DISCORD_TOKEN")

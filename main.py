@@ -32,7 +32,7 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
 
-# Mở tệp Mechanic2.0 và chọn trang tính (tab) tên 'Chấm công NPC'
+# Mở tệp Mechanic2.0 và chọn trang tính (tab) 'Chấm công NPC'
 sheet = client.open("Mechanic2.0").worksheet("Chấm công NPC")
 
 # --- CẤU HÌNH BOT DISCORD ---
@@ -55,13 +55,12 @@ def save_to_sheet(user_id, user_name, date_str, start_time, end_time, hours):
     ])
 
 def get_user_total_hours(user_id):
-    """Hàm đọc dữ liệu từ Google Sheet và tính tổng số giờ của 1 user"""
+    """Hàm đọc dữ liệu từ Google Sheet và tính tổng số giờ của 1 user cụ thể"""
     records = sheet.get_all_records()
     total_hours = 0.0
     user_records = []
 
     for row in records:
-        # Cột 'User ID' trên Google Sheet (đối chiếu dạng string)
         if str(row.get("User ID")) == str(user_id):
             try:
                 hours_val = str(row.get("Tổng Giờ", 0)).replace(",", ".")
@@ -72,6 +71,38 @@ def get_user_total_hours(user_id):
                 continue
 
     return total_hours, user_records
+
+def get_all_users_summary():
+    """Hàm quét toàn bộ Sheet và tổng hợp giờ làm của tất cả thành viên"""
+    records = sheet.get_all_records()
+    summary = {} # { "user_id": {"name": "Tên", "total_hours": 0.0, "count": 0} }
+
+    for row in records:
+        u_id = str(row.get("User ID", "")).strip()
+        u_name = str(row.get("Tên", "Không rõ")).strip()
+        
+        if not u_id:
+            continue
+
+        try:
+            hours_val = str(row.get("Tổng Giờ", 0)).replace(",", ".")
+            hours = float(hours_val)
+        except ValueError:
+            hours = 0.0
+
+        if u_id not in summary:
+            summary[u_id] = {
+                "name": u_name,
+                "total_hours": 0.0,
+                "count": 0
+            }
+
+        summary[u_id]["total_hours"] += hours
+        summary[u_id]["count"] += 1
+        # Cập nhật tên mới nhất nếu người dùng đổi tên
+        summary[u_id]["name"] = u_name
+
+    return summary
 
 # --- MODAL BÁO ONLINE ---
 class CheckInModal(ui.Modal, title="Báo giờ Online"):
@@ -192,7 +223,7 @@ async def setup_bot(ctx):
     )
     await ctx.send(embed=embed, view=TimekeepingView())
 
-# --- LỆNH TRA CỨU DÀNH CHO ADMIN (SLASH COMMAND /tracuu @tênthànhviên) ---
+# --- LỆNH TRA CỨU CÁ NHÂN (SLASH COMMAND /tracuu @tênthànhviên) ---
 @bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ chấm công của 1 thành viên bất kỳ")
 @app_commands.checks.has_permissions(administrator=True)
 async def tracuu(interaction: discord.Interaction, member: discord.Member):
@@ -217,7 +248,7 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
 
         embed.add_field(name="👤 Thành viên", value=member.mention, inline=True)
         embed.add_field(name="📅 Số buổi làm", value=f"`{len(user_records)} buổi`", inline=True)
-        embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours} giờ**", inline=False)
+        embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours:.1f} giờ**", inline=False)
 
         # Hiển thị tối đa 3 lần chấm công gần nhất
         recent_str = ""
@@ -231,11 +262,53 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         await interaction.followup.send(f"⚠️ Đã xảy ra lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
+# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (SLASH COMMAND /tonghop) ---
+@bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm của tất cả thành viên")
+@app_commands.checks.has_permissions(administrator=True)
+async def tonghop(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        summary_data = get_all_users_summary()
+
+        if not summary_data:
+            await interaction.followup.send("❌ Dữ liệu trên Google Sheet hiện đang trống.", ephemeral=True)
+            return
+
+        # Sắp xếp danh sách theo số giờ giảm dần
+        sorted_summary = sorted(summary_data.values(), key=lambda x: x["total_hours"], reverse=True)
+
+        embed = discord.Embed(
+            title="📋 BẢNG TỔNG HỢP GIỜ CHẤM CÔNG THÀNH VIÊN",
+            description=f"Cập nhật lúc: `{datetime.now().strftime('%H:%M - %d/%m/%Y')}`",
+            color=discord.Color.gold()
+        )
+
+        grand_total_hours = 0.0
+        list_content = ""
+
+        for idx, u_info in enumerate(sorted_summary, start=1):
+            grand_total_hours += u_info["total_hours"]
+            list_content += f"**{idx}. {u_info['name']}**: `{u_info['total_hours']:.1f} giờ` ({u_info['count']} buổi)\n"
+
+        embed.add_field(name="👥 Danh sách chi tiết", value=list_content, inline=False)
+        embed.add_field(
+            name="📊 Thống kê chung", 
+            value=f"• **Tổng số thành viên:** `{len(sorted_summary)} người`\n"
+                  f"• **Tổng cộng toàn máy chủ:** `{grand_total_hours:.1f} giờ`", 
+            inline=False
+        )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Đã xảy ra lỗi khi tổng hợp dữ liệu: {e}", ephemeral=True)
+
 # --- SỰ KIỆN KHỞI ĐỘNG BOT ---
 @bot.event
 async def on_ready():
     bot.add_view(TimekeepingView())
-    await bot.tree.sync() # Đồng bộ lệnh Slash Command (/tracuu)
+    await bot.tree.sync() # Đồng bộ các Slash Command (/tracuu, /tonghop)
     print(f"Bot {bot.user.name} đã kết nối và đồng bộ lệnh thành công!")
 
 # Lấy Token từ biến môi trường của Render

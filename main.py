@@ -1,4 +1,5 @@
 import os
+import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
@@ -75,11 +76,12 @@ def get_user_total_hours(user_id):
 def get_all_users_summary():
     """Hàm quét toàn bộ Sheet và tổng hợp giờ làm của tất cả thành viên"""
     records = sheet.get_all_records()
-    summary = {} # { "user_id": {"name": "Tên", "total_hours": 0.0, "count": 0} }
+    summary = {}
 
     for row in records:
         u_id = str(row.get("User ID", "")).strip()
-        u_name = str(row.get("Tên", "Không rõ")).strip()
+        # Khắc phục lỗi "Không rõ": Đọc đúng tên cột "Tên" trên Google Sheet
+        u_name = str(row.get("Tên", "")).strip() or str(row.get("Tên Member", "")).strip() or "Thành viên"
         
         if not u_id:
             continue
@@ -99,8 +101,8 @@ def get_all_users_summary():
 
         summary[u_id]["total_hours"] += hours
         summary[u_id]["count"] += 1
-        # Cập nhật tên mới nhất nếu người dùng đổi tên
-        summary[u_id]["name"] = u_name
+        if u_name and u_name != "Thành viên":
+            summary[u_id]["name"] = u_name
 
     return summary
 
@@ -139,10 +141,13 @@ class CheckInModal(ui.Modal, title="Báo giờ Online"):
             "start_time": start_time
         }
 
+        # Gửi thông báo công khai và tự động xóa sau 10 giây
         await interaction.response.send_message(
-            f"✅ **{user_name}** đã báo Online lúc `{start_time}`!", 
+            f"✅ **{user_name}** đã báo Online lúc `{start_time}`! *(Tin nhắn tự xóa sau 10s)*", 
             ephemeral=False
         )
+        msg = await interaction.original_response()
+        await msg.delete(delay=10)
 
 # --- MODAL BÁO OFFLINE ---
 class CheckOutModal(ui.Modal, title="Báo giờ Offline"):
@@ -175,9 +180,11 @@ class CheckOutModal(ui.Modal, title="Báo giờ Offline"):
             save_to_sheet(user_id, user_name, today, start_time, end_time, hours)
             await interaction.response.send_message(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time}` (Bắt đầu: `{start_time}`). Tổng: **{hours} giờ**.\n"
-                f"📊 *Dữ liệu đã được lưu vào Google Sheet!*",
+                f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*",
                 ephemeral=False
             )
+            msg = await interaction.original_response()
+            await msg.delete(delay=10)
         except Exception as e:
             await interaction.response.send_message(
                 f"⚠️ Đã lưu thông tin nhưng gặp lỗi kết nối Google Sheet: {e}",
@@ -308,7 +315,7 @@ async def tonghop(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     bot.add_view(TimekeepingView())
-    await bot.tree.sync() # Đồng bộ các Slash Command (/tracuu, /tonghop)
+    await bot.tree.sync()
     print(f"Bot {bot.user.name} đã kết nối và đồng bộ lệnh thành công!")
 
 # Lấy Token từ biến môi trường của Render

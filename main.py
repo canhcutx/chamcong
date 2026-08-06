@@ -32,8 +32,8 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
 
-# Mở tệp Google Sheet
-sheet = client.open("Chấm công NPC").sheet1
+# Mở tệp Mechanic2.0 và chọn trang tính (tab) tên 'Chấm công NPC'
+sheet = client.open("Mechanic2.0").worksheet("Chấm công NPC")
 
 # --- CẤU HÌNH BOT DISCORD ---
 intents = discord.Intents.default()

@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord.ext import commands
 from discord import app_commands, ui
@@ -6,17 +8,30 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
+# --- TẠO WEB SERVER ĐỂ CHẠY RENDER WEB SERVICE FREE ---
+class DummyServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Discord is running!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), DummyServer)
+    server.serve_forever()
+
+# Chạy server ở luồng riêng
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
 # --- KẾT NỐI GOOGLE SHEETS ---
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Tự động kết nối tới credentials.json (ở máy cục bộ hoặc Secret File trên Render)
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
 
-# ⚠️ ĐỔI TÊN NÀY THÀNH TÊN EXACT CỦA TỆP GOOGLE SHEET CỦA BẠN
 sheet = client.open("Chấm công NPC").sheet1
 
 # --- CẤU HÌNH BOT DISCORD ---
@@ -24,9 +39,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Dictionary lưu tạm các ca đang làm việc (reset khi restart bot)
-active_sessions = {} # {user_id: {"name": user_name, "start_time": start_time}}
+active_sessions = {}
 
+# (Giữ nguyên đoạn def save_to_sheet và các phần bên dưới)
 def save_to_sheet(user_id, user_name, date_str, start_time, end_time, hours):
     """Hàm ghi 1 hàng mới vào Google Sheets"""
     sheet.append_row([

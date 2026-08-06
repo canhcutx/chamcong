@@ -284,11 +284,12 @@ async def setup_bot(ctx):
 
 # --- LỆNH TRA CỨU (/tracuu HOẶC /tracuu @tênngườidùng) ---
 @bot.tree.command(name="tracuu", description="Tra cứu tổng giờ & lương chấm công của bản thân hoặc 1 thành viên")
+@app_commands.describe(member="[Tùy chọn] Chọn thành viên cần tra cứu (để trống để tự tra cứu bản thân)")
 async def tracuu(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     await interaction.response.defer(ephemeral=True)
 
-    # Nếu không nhập 'member' thì mặc định lấy chính người gõ lệnh
-    target_member = member or interaction.user
+    # Nếu người dùng không tag ai, lấy chính người vừa gõ lệnh
+    target_member = member if member is not None else interaction.user
 
     try:
         total_hours, total_salary, user_records = get_user_total_hours(target_member.id)

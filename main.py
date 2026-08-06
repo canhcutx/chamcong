@@ -42,25 +42,26 @@ def get_active_session_from_sheet():
     """Kiểm tra trên Sheet xem có ai đang On (Giờ Off = 'ON') hay không"""
     records = sheet.get_all_records()
     for idx, row in enumerate(records, start=2): # Dòng 2 bắt đầu dữ liệu
-        if str(row.get("Giờ Off", "")).upper() == "ON":
+        if str(row.get("Giờ Off", "")).strip().upper() == "ON":
             return idx, row
     return None, None
 
-def save_checkin_sheet(user_id, user_name, date_str, start_time):
-    """Ghi nhận lượt báo Online mới vào Sheet"""
+def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time):
+    """Ghi nhận lượt báo Online mới vào Sheet (Đúng 7 cột A -> G)"""
     sheet.append_row([
-        str(user_id),
-        user_name,
-        date_str,
-        start_time,
-        "ON", # Đánh dấu đang Online
-        0
+        str(user_id),  # A: User ID
+        str(gacha_id), # B: ID Gacha
+        user_name,     # C: Tên
+        date_str,      # D: Ngày
+        start_time,    # E: Giờ On
+        "ON",          # F: Giờ Off (Đánh dấu đang Online)
+        0              # G: Tổng Giờ
     ])
 
 def update_checkout_sheet(row_idx, end_time, hours):
     """Cập nhật Giờ Off và Tổng Giờ cho dòng đang Online"""
-    sheet.update_cell(row_idx, 5, end_time) # Cột 5 là 'Giờ Off'
-    sheet.update_cell(row_idx, 6, hours)    # Cột 6 là 'Tổng Giờ'
+    sheet.update_cell(row_idx, 6, end_time) # Cột F (Cột 6) là 'Giờ Off'
+    sheet.update_cell(row_idx, 7, hours)    # Cột G (Cột 7) là 'Tổng Giờ'
 
 def get_user_total_hours(user_id):
     """Tính tổng giờ làm của 1 user"""
@@ -74,7 +75,7 @@ def get_user_total_hours(user_id):
                 hours_val = str(row.get("Tổng Giờ", 0)).replace(",", ".")
                 hours = float(hours_val)
                 total_hours += hours
-                if str(row.get("Giờ Off")) != "ON":
+                if str(row.get("Giờ Off")).upper() != "ON":
                     user_records.append(row)
             except ValueError:
                 continue
@@ -88,8 +89,7 @@ def get_all_users_summary():
 
     for row in records:
         u_id = str(row.get("User ID", "")).strip()
-        # Đọc linh hoạt các tiêu đề cột Tên
-        u_name = str(row.get("Tên", "")).strip() or str(row.get("Tên Member", "")).strip() or str(row.get("User", "")).strip()
+        u_name = str(row.get("Tên", "")).strip() or str(row.get("Tên Member", "")).strip()
         
         if not u_id:
             continue
@@ -108,7 +108,7 @@ def get_all_users_summary():
             }
 
         summary[u_id]["total_hours"] += hours
-        if str(row.get("Giờ Off")) != "ON":
+        if str(row.get("Giờ Off")).upper() != "ON":
             summary[u_id]["count"] += 1
             
         if u_name and summary[u_id]["name"] == "Không tên":
@@ -118,11 +118,13 @@ def get_all_users_summary():
 
 # --- MODAL BÁO ONLINE ---
 class CheckInModal(ui.Modal, title="Báo giờ Online"):
+    gacha_input = ui.TextInput(label="ID Gacha", placeholder="Nhập ID Gacha của bạn...")
     time_input = ui.TextInput(label="Giờ bắt đầu (VD: 15h00)", placeholder="15h00")
 
     async def on_submit(self, interaction: discord.Interaction):
         user_id = interaction.user.id
         user_name = interaction.user.display_name
+        gacha_id = self.gacha_input.value
         start_time = self.time_input.value
 
         # Kiểm tra ca làm trực tiếp từ Google Sheet
@@ -130,7 +132,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online"):
         
         if active_row:
             current_user_id = str(active_row.get("User ID"))
-            current_name = active_row.get("Tên") or active_row.get("Tên Member") or "Thành viên khác"
+            current_name = active_row.get("Tên") or "Thành viên khác"
             
             if current_user_id == str(user_id):
                 await interaction.response.send_message(
@@ -148,11 +150,11 @@ class CheckInModal(ui.Modal, title="Báo giờ Online"):
             return
 
         today = datetime.now().strftime("%Y-%m-%d")
-        save_checkin_sheet(user_id, user_name, today, start_time)
+        save_checkin_sheet(user_id, gacha_id, user_name, today, start_time)
 
         # Gửi thông báo công khai và tự động xóa sau 10 giây
         await interaction.response.send_message(
-            f"✅ **{user_name}** đã báo Online lúc `{start_time}`! *(Tin nhắn tự xóa sau 10s)*", 
+            f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time}`! *(Tin nhắn tự xóa sau 10s)*", 
             ephemeral=False
         )
         msg = await interaction.original_response()
@@ -218,9 +220,10 @@ class TimekeepingView(ui.View):
         if not active_row:
             await interaction.response.send_message("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
         else:
-            name = active_row.get("Tên") or active_row.get("Tên Member") or "Thành viên"
+            name = active_row.get("Tên") or "Thành viên"
+            gacha_id = active_row.get("ID Gacha") or "N/A"
             start_time = active_row.get("Giờ On")
-            msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (Bắt đầu lúc `{start_time}`)"
+            msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_time}`"
             await interaction.response.send_message(msg, ephemeral=True)
 
 # --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
@@ -230,7 +233,7 @@ async def setup_bot(ctx):
     embed = discord.Embed(
         title="⏰ BẢNG CHẤM CÔNG VÀ QUẢN LÝ CA LÀM",
         description=(
-            "• Nhấn **Báo Online** để bắt đầu ca (Bot sẽ chặn nếu đã có người khác đang Online).\n"
+            "• Nhấn **Báo Online** để bắt đầu ca (Cần nhập ID Gacha & Giờ bắt đầu).\n"
             "• Nhấn **Báo Offline** để kết thúc ca và ghi vào Google Sheet.\n"
             "• Nhấn **Ai đang Online?** để kiểm tra ca hiện tại."
         ),

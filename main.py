@@ -8,6 +8,7 @@ from discord import app_commands, ui
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
@@ -73,7 +74,7 @@ def update_checkout_sheet(row_idx, end_time, hours, salary):
     """Cập nhật Giờ Off, Tổng Giờ và Tổng Lương vào cột F, G, H"""
     sheet.update_cell(row_idx, 6, end_time)      # Cột F: Giờ Off
     sheet.update_cell(row_idx, 7, round(hours, 2)) # Cột G: Tổng Giờ
-    sheet.update_cell(row_idx, 8, round(salary))   # Cột H: Tổng Lương (Ghi vào Sheet)
+    sheet.update_cell(row_idx, 8, round(salary))   # Cột H: Tổng Lương
 
 def get_user_total_hours(user_id):
     """Tính tổng giờ làm và tổng lương của 1 user"""
@@ -281,30 +282,32 @@ async def setup_bot(ctx):
     )
     await ctx.send(embed=embed, view=TimekeepingView())
 
-# --- LỆNH TRA CỨU CÁ NHÂN (/tracuu @tênthànhviên) ---
-@bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ & lương chấm công của 1 thành viên")
-@app_commands.checks.has_permissions(administrator=True)
-async def tracuu(interaction: discord.Interaction, member: discord.Member):
+# --- LỆNH TRA CỨU (/tracuu HOẶC /tracuu @tênngườidùng) ---
+@bot.tree.command(name="tracuu", description="Tra cứu tổng giờ & lương chấm công của bản thân hoặc 1 thành viên")
+async def tracuu(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     await interaction.response.defer(ephemeral=True)
 
+    # Nếu không nhập 'member' thì mặc định lấy chính người gõ lệnh
+    target_member = member or interaction.user
+
     try:
-        total_hours, total_salary, user_records = get_user_total_hours(member.id)
+        total_hours, total_salary, user_records = get_user_total_hours(target_member.id)
 
         if not user_records:
             await interaction.followup.send(
-                f"❌ Chưa có dữ liệu chấm công hoàn tất nào trên Google Sheet cho **{member.display_name}**.",
+                f"❌ Chưa có dữ liệu chấm công hoàn tất nào trên Google Sheet cho **{target_member.display_name}**.",
                 ephemeral=True
             )
             return
 
         embed = discord.Embed(
-            title=f"📊 Báo Cáo Chấm Công: {member.display_name}",
+            title=f"📊 Báo Cáo Chấm Công: {target_member.display_name}",
             color=discord.Color.green()
         )
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
+        if target_member.avatar:
+            embed.set_thumbnail(url=target_member.avatar.url)
 
-        embed.add_field(name="👤 Thành viên", value=member.mention, inline=True)
+        embed.add_field(name="👤 Thành viên", value=target_member.mention, inline=True)
         embed.add_field(name="📅 Số buổi làm", value=f"`{len(user_records)} buổi`", inline=True)
         embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours:.2f} giờ**", inline=False)
         embed.add_field(name="💰 TỔNG LƯƠNG TẠM TÍNH", value=f"**{total_salary:,.0f} IC**", inline=False)
@@ -319,7 +322,7 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         await interaction.followup.send(f"⚠️ Lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
-# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop) ---
+# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop - Dành cho Admin) ---
 @bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm và tiền lương")
 @app_commands.checks.has_permissions(administrator=True)
 async def tonghop(interaction: discord.Interaction):

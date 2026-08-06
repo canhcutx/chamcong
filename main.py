@@ -1,5 +1,4 @@
 import os
-import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
@@ -21,7 +20,6 @@ def run_dummy_server():
     server = HTTPServer(("0.0.0.0", port), DummyServer)
     server.serve_forever()
 
-# Chạy server ở luồng riêng
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- KẾT NỐI GOOGLE SHEETS ---
@@ -32,8 +30,6 @@ scope = [
 
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
-
-# Mở tệp Mechanic2.0 và chọn trang tính (tab) 'Chấm công NPC'
 sheet = client.open("Mechanic2.0").worksheet("Chấm công NPC")
 
 # --- CẤU HÌNH BOT DISCORD ---
@@ -41,22 +37,33 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Dictionary lưu tạm các ca đang làm việc
-active_sessions = {}
+# --- CÁC HÀM XỬ LÝ GOOGLE SHEET TỰ ĐỘNG ---
+def get_active_session_from_sheet():
+    """Kiểm tra trên Sheet xem có ai đang On (Giờ Off = 'ON') hay không"""
+    records = sheet.get_all_records()
+    for idx, row in enumerate(records, start=2): # Dòng 2 bắt đầu dữ liệu
+        if str(row.get("Giờ Off", "")).upper() == "ON":
+            return idx, row
+    return None, None
 
-def save_to_sheet(user_id, user_name, date_str, start_time, end_time, hours):
-    """Hàm ghi 1 hàng mới vào Google Sheets"""
+def save_checkin_sheet(user_id, user_name, date_str, start_time):
+    """Ghi nhận lượt báo Online mới vào Sheet"""
     sheet.append_row([
         str(user_id),
         user_name,
         date_str,
         start_time,
-        end_time,
-        hours
+        "ON", # Đánh dấu đang Online
+        0
     ])
 
+def update_checkout_sheet(row_idx, end_time, hours):
+    """Cập nhật Giờ Off và Tổng Giờ cho dòng đang Online"""
+    sheet.update_cell(row_idx, 5, end_time) # Cột 5 là 'Giờ Off'
+    sheet.update_cell(row_idx, 6, hours)    # Cột 6 là 'Tổng Giờ'
+
 def get_user_total_hours(user_id):
-    """Hàm đọc dữ liệu từ Google Sheet và tính tổng số giờ của 1 user cụ thể"""
+    """Tính tổng giờ làm của 1 user"""
     records = sheet.get_all_records()
     total_hours = 0.0
     user_records = []
@@ -67,21 +74,22 @@ def get_user_total_hours(user_id):
                 hours_val = str(row.get("Tổng Giờ", 0)).replace(",", ".")
                 hours = float(hours_val)
                 total_hours += hours
-                user_records.append(row)
+                if str(row.get("Giờ Off")) != "ON":
+                    user_records.append(row)
             except ValueError:
                 continue
 
     return total_hours, user_records
 
 def get_all_users_summary():
-    """Hàm quét toàn bộ Sheet và tổng hợp giờ làm của tất cả thành viên"""
+    """Lấy tổng hợp danh sách giờ làm của tất cả thành viên"""
     records = sheet.get_all_records()
     summary = {}
 
     for row in records:
         u_id = str(row.get("User ID", "")).strip()
-        # Khắc phục lỗi "Không rõ": Đọc đúng tên cột "Tên" trên Google Sheet
-        u_name = str(row.get("Tên", "")).strip() or str(row.get("Tên Member", "")).strip() or "Thành viên"
+        # Đọc linh hoạt các tiêu đề cột Tên
+        u_name = str(row.get("Tên", "")).strip() or str(row.get("Tên Member", "")).strip() or str(row.get("User", "")).strip()
         
         if not u_id:
             continue
@@ -94,14 +102,16 @@ def get_all_users_summary():
 
         if u_id not in summary:
             summary[u_id] = {
-                "name": u_name,
+                "name": u_name if u_name else "Không tên",
                 "total_hours": 0.0,
                 "count": 0
             }
 
         summary[u_id]["total_hours"] += hours
-        summary[u_id]["count"] += 1
-        if u_name and u_name != "Thành viên":
+        if str(row.get("Giờ Off")) != "ON":
+            summary[u_id]["count"] += 1
+            
+        if u_name and summary[u_id]["name"] == "Không tên":
             summary[u_id]["name"] = u_name
 
     return summary
@@ -115,31 +125,30 @@ class CheckInModal(ui.Modal, title="Báo giờ Online"):
         user_name = interaction.user.display_name
         start_time = self.time_input.value
 
-        # Chặn nếu đã có người khác đang Online
-        if active_sessions:
-            current_user_id = list(active_sessions.keys())[0]
-            current_info = active_sessions[current_user_id]
+        # Kiểm tra ca làm trực tiếp từ Google Sheet
+        row_idx, active_row = get_active_session_from_sheet()
+        
+        if active_row:
+            current_user_id = str(active_row.get("User ID"))
+            current_name = active_row.get("Tên") or active_row.get("Tên Member") or "Thành viên khác"
             
-            if current_user_id == user_id:
+            if current_user_id == str(user_id):
                 await interaction.response.send_message(
-                    f"⚠️ Bạn đã báo Online rồi (lúc `{current_info['start_time']}`). Hãy báo Offline trước khi check-in lại!",
+                    f"⚠️ Bạn đã báo Online rồi (lúc `{active_row.get('Giờ On')}`). Hãy báo Offline trước khi check-in lại!",
                     ephemeral=True
                 )
                 return
 
             await interaction.response.send_message(
                 f"❌ **Khung giờ này đã có người làm việc!**\n"
-                f"👤 **{current_info['name']}** đang online từ lúc `{current_info['start_time']}`.\n"
-                f"Bạn không thể báo Online cho tới khi ca làm hiện tại kết thúc.",
+                f"👤 **{current_name}** đang online từ lúc `{active_row.get('Giờ On')}`.\n"
+                f"Bạn không thể báo Online cho tới khi ca hiện tại kết thúc.",
                 ephemeral=True
             )
             return
 
-        # Lưu phiên online
-        active_sessions[user_id] = {
-            "name": user_name,
-            "start_time": start_time
-        }
+        today = datetime.now().strftime("%Y-%m-%d")
+        save_checkin_sheet(user_id, user_name, today, start_time)
 
         # Gửi thông báo công khai và tự động xóa sau 10 giây
         await interaction.response.send_message(
@@ -159,9 +168,11 @@ class CheckOutModal(ui.Modal, title="Báo giờ Offline"):
         user_name = interaction.user.display_name
         end_time = self.time_input.value
         
-        if user_id not in active_sessions:
+        row_idx, active_row = get_active_session_from_sheet()
+
+        if not active_row or str(active_row.get("User ID")) != str(user_id):
             await interaction.response.send_message(
-                "⚠️ Bạn chưa báo Online nên không thể báo Offline!", 
+                "⚠️ Bạn chưa báo Online (hoặc ca làm đang thuộc về người khác) nên không thể báo Offline!", 
                 ephemeral=True
             )
             return
@@ -171,13 +182,10 @@ class CheckOutModal(ui.Modal, title="Báo giờ Offline"):
         except ValueError:
             hours = 0.0
 
-        session_info = active_sessions.pop(user_id)
-        start_time = session_info["start_time"]
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        # Ghi trực tiếp vào Google Sheets
+        start_time = active_row.get("Giờ On")
+        
         try:
-            save_to_sheet(user_id, user_name, today, start_time, end_time, hours)
+            update_checkout_sheet(row_idx, end_time, hours)
             await interaction.response.send_message(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time}` (Bắt đầu: `{start_time}`). Tổng: **{hours} giờ**.\n"
                 f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*",
@@ -187,7 +195,7 @@ class CheckOutModal(ui.Modal, title="Báo giờ Offline"):
             await msg.delete(delay=10)
         except Exception as e:
             await interaction.response.send_message(
-                f"⚠️ Đã lưu thông tin nhưng gặp lỗi kết nối Google Sheet: {e}",
+                f"⚠️ Lỗi khi cập nhật Google Sheet: {e}",
                 ephemeral=True
             )
 
@@ -206,19 +214,19 @@ class TimekeepingView(ui.View):
 
     @ui.button(label="👀 Ai đang Online?", style=discord.ButtonStyle.secondary, custom_id="btn_who_online")
     async def who_online_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not active_sessions:
+        _, active_row = get_active_session_from_sheet()
+        if not active_row:
             await interaction.response.send_message("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
         else:
-            msg = "**📌 Danh sách người đang Online hiện tại:**\n"
-            for u_id, info in active_sessions.items():
-                msg += f"- 👤 **{info['name']}** (Online từ lúc `{info['start_time']}`)\n"
+            name = active_row.get("Tên") or active_row.get("Tên Member") or "Thành viên"
+            start_time = active_row.get("Giờ On")
+            msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (Bắt đầu lúc `{start_time}`)"
             await interaction.response.send_message(msg, ephemeral=True)
 
-# --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG (PREFIX) ---
+# --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup_bot(ctx):
-    """Lệnh để Admin hiển thị bảng nút bấm vào Channel"""
     embed = discord.Embed(
         title="⏰ BẢNG CHẤM CÔNG VÀ QUẢN LÝ CA LÀM",
         description=(
@@ -230,7 +238,7 @@ async def setup_bot(ctx):
     )
     await ctx.send(embed=embed, view=TimekeepingView())
 
-# --- LỆNH TRA CỨU CÁ NHÂN (SLASH COMMAND /tracuu @tênthànhviên) ---
+# --- LỆNH TRA CỨU CÁ NHÂN (/tracuu @tênthànhviên) ---
 @bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ chấm công của 1 thành viên bất kỳ")
 @app_commands.checks.has_permissions(administrator=True)
 async def tracuu(interaction: discord.Interaction, member: discord.Member):
@@ -241,7 +249,7 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
 
         if not user_records:
             await interaction.followup.send(
-                f"❌ Chưa có dữ liệu chấm công nào trên Google Sheet cho thành viên **{member.display_name}**.",
+                f"❌ Chưa có dữ liệu chấm công hoàn tất nào trên Google Sheet cho **{member.display_name}**.",
                 ephemeral=True
             )
             return
@@ -257,19 +265,17 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
         embed.add_field(name="📅 Số buổi làm", value=f"`{len(user_records)} buổi`", inline=True)
         embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours:.1f} giờ**", inline=False)
 
-        # Hiển thị tối đa 3 lần chấm công gần nhất
         recent_str = ""
         for r in user_records[-3:]:
             recent_str += f"• `{r.get('Ngày')}`: {r.get('Giờ On')} ➔ {r.get('Giờ Off')} (**{r.get('Tổng Giờ')}h**)\n"
         
         embed.add_field(name="📝 Ca làm gần đây", value=recent_str or "Không có", inline=False)
-
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Đã xảy ra lỗi khi đọc Google Sheet: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
-# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (SLASH COMMAND /tonghop) ---
+# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop) ---
 @bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm của tất cả thành viên")
 @app_commands.checks.has_permissions(administrator=True)
 async def tonghop(interaction: discord.Interaction):
@@ -282,7 +288,6 @@ async def tonghop(interaction: discord.Interaction):
             await interaction.followup.send("❌ Dữ liệu trên Google Sheet hiện đang trống.", ephemeral=True)
             return
 
-        # Sắp xếp danh sách theo số giờ giảm dần
         sorted_summary = sorted(summary_data.values(), key=lambda x: x["total_hours"], reverse=True)
 
         embed = discord.Embed(
@@ -316,11 +321,10 @@ async def tonghop(interaction: discord.Interaction):
 async def on_ready():
     bot.add_view(TimekeepingView())
     await bot.tree.sync()
-    print(f"Bot {bot.user.name} đã kết nối và đồng bộ lệnh thành công!")
+    print(f"Bot {bot.user.name} đã kết nối và đồng bộ thành công!")
 
-# Lấy Token từ biến môi trường của Render
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
 else:
-    print("❌ Lỗi: Chưa cấu hình DISCORD_TOKEN trong Environment Variable!")
+    print("❌ Lỗi: Chưa cấu hình DISCORD_TOKEN!")

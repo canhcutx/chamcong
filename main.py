@@ -12,6 +12,9 @@ from datetime import datetime, timezone, timedelta
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
 
+# Mức lương cố định / 1 giờ (VNĐ)
+HOURLY_RATE = 15000
+
 # --- TẠO WEB SERVER ĐỂ CHẠY RENDER WEB SERVICE FREE ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -54,26 +57,29 @@ def get_active_session_from_sheet():
     return None, None
 
 def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, timestamp_start):
-    """Ghi nhận lượt báo Online mới vào Sheet (Cột A->G)"""
+    """Ghi nhận lượt báo Online mới vào Sheet (Cột A->H)"""
     sheet.append_row([
         str(user_id),       # A (0): User ID
         str(gacha_id),      # B (1): ID Gacha
         user_name,          # C (2): Tên
         date_str,           # D (3): Ngày Bắt Đầu
-        f"{start_time}|{timestamp_start}", # E (4): Giờ On (Lưu kèm Timestamp để tính toán)
+        f"{start_time}|{timestamp_start}", # E (4): Giờ On
         "ON",               # F (5): Giờ Off
-        0                   # G (6): Tổng Giờ
+        0,                  # G (6): Tổng Giờ
+        0                   # H (7): Tổng Lương
     ])
 
-def update_checkout_sheet(row_idx, end_time, hours):
-    """Cập nhật Giờ Off và Tổng Giờ"""
-    sheet.update_cell(row_idx, 6, end_time) # Cột F
-    sheet.update_cell(row_idx, 7, round(hours, 2)) # Cột G (Làm tròn 2 chữ số thập phân)
+def update_checkout_sheet(row_idx, end_time, hours, salary):
+    """Cập nhật Giờ Off, Tổng Giờ và Tổng Lương"""
+    sheet.update_cell(row_idx, 6, end_time) # Cột F: Giờ Off
+    sheet.update_cell(row_idx, 7, round(hours, 2)) # Cột G: Tổng Giờ
+    sheet.update_cell(row_idx, 8, round(salary))   # Cột H: Tổng Lương
 
 def get_user_total_hours(user_id):
-    """Tính tổng giờ làm của 1 user"""
+    """Tính tổng giờ làm và tổng lương của 1 user"""
     all_values = sheet.get_all_values()
     total_hours = 0.0
+    total_salary = 0.0
     user_records = []
 
     if len(all_values) > 1:
@@ -82,22 +88,27 @@ def get_user_total_hours(user_id):
                 try:
                     hours_val = str(row[6]).replace(",", ".")
                     hours = float(hours_val)
+                    salary = hours * HOURLY_RATE
+                    
                     total_hours += hours
+                    total_salary += salary
+                    
                     if str(row[5]).strip().upper() != "ON":
                         start_time_clean = str(row[4]).split("|")[0] if "|" in str(row[4]) else str(row[4])
                         user_records.append({
                             "Ngày": row[3],
                             "Giờ On": start_time_clean,
                             "Giờ Off": row[5],
-                            "Tổng Giờ": round(hours, 2)
+                            "Tổng Giờ": round(hours, 2),
+                            "Lương": round(salary)
                         })
                 except ValueError:
                     continue
 
-    return round(total_hours, 2), user_records
+    return round(total_hours, 2), round(total_salary), user_records
 
 def get_all_users_summary():
-    """Thống kê toàn bộ thành viên"""
+    """Thống kê toàn bộ thành viên (Tổng giờ & Tổng lương)"""
     all_values = sheet.get_all_values()
     summary = {}
 
@@ -118,14 +129,19 @@ def get_all_users_summary():
             except ValueError:
                 hours = 0.0
 
+            salary = hours * HOURLY_RATE
+
             if u_id not in summary:
                 summary[u_id] = {
                     "name": u_name if u_name else "Không tên",
                     "total_hours": 0.0,
+                    "total_salary": 0.0,
                     "count": 0
                 }
 
             summary[u_id]["total_hours"] += hours
+            summary[u_id]["total_salary"] += salary
+            
             if len(row) >= 6 and str(row[5]).strip().upper() != "ON":
                 summary[u_id]["count"] += 1
                 
@@ -135,7 +151,7 @@ def get_all_users_summary():
     return summary
 
 # --- MODAL BÁO ONLINE ---
-class CheckInModal(ui.Modal, title="Báo giờ Online (Thời gian tự động)"):
+class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
     gacha_input = ui.TextInput(label="ID Gacha", placeholder="Nhập ID Gacha của bạn...")
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -148,7 +164,6 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Thời gian tự động)
         if active_row:
             current_user_id = str(active_row[0])
             current_name = str(active_row[2]) if len(active_row) >= 3 and active_row[2] else "Thành viên khác"
-            
             start_display = str(active_row[4]).split("|")[0] if "|" in str(active_row[4]) else str(active_row[4])
 
             if current_user_id == str(user_id):
@@ -207,24 +222,24 @@ class TimekeepingView(ui.View):
         end_time_str = now_vn.strftime("%H:%M")
         current_timestamp = int(time.time())
 
-        # Lấy thông tin thời gian bắt đầu
         raw_start = str(active_row[4])
         if "|" in raw_start:
             start_display, start_ts = raw_start.split("|")
             start_timestamp = int(start_ts)
         else:
             start_display = raw_start
-            start_timestamp = current_timestamp # Fallback nếu dữ liệu cũ không có timestamp
+            start_timestamp = current_timestamp
 
-        # Tính chính xác số giờ làm việc dựa trên chênh lệch Timestamp
         elapsed_seconds = max(0, current_timestamp - start_timestamp)
         hours = elapsed_seconds / 3600.0
+        salary = hours * HOURLY_RATE
 
         try:
-            update_checkout_sheet(row_idx, end_time_str, hours)
+            update_checkout_sheet(row_idx, end_time_str, hours, salary)
             await interaction.response.send_message(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time_str}` (Bắt đầu: `{start_display}`).\n"
-                f"⏳ **Tổng thời gian ca làm:** `{hours:.2f} giờ` ({int(elapsed_seconds//60)} phút).\n"
+                f"⏳ **Thời gian làm:** `{hours:.2f} giờ` ({int(elapsed_seconds//60)} phút).\n"
+                f"💵 **Lương ca này:** `{salary:,.0f} VNĐ`\n"
                 f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*",
                 ephemeral=False
             )
@@ -257,8 +272,9 @@ async def setup_bot(ctx):
     embed = discord.Embed(
         title="⏰ BẢNG CHẤM CÔNG VÀ QUẢN LÝ CA LÀM",
         description=(
-            "• Nhấn **Báo Online** để bắt đầu ca (Nhập ID Gacha - Thời gian tự động tính).\n"
-            "• Nhấn **Báo Offline** để kết thúc ca (Tự động tính giờ chuẩn xác 100%).\n"
+            f"• Lương cơ bản: **{HOURLY_RATE:,.0f} VNĐ / 1 giờ**\n"
+            "• Nhấn **Báo Online** để bắt đầu ca (Nhập ID Gacha - Thời gian tự động).\n"
+            "• Nhấn **Báo Offline** để kết thúc ca (Tự động tính giờ & lương).\n"
             "• Nhấn **Ai đang Online?** để kiểm tra ca hiện tại."
         ),
         color=discord.Color.blue()
@@ -266,13 +282,13 @@ async def setup_bot(ctx):
     await ctx.send(embed=embed, view=TimekeepingView())
 
 # --- LỆNH TRA CỨU CÁ NHÂN (/tracuu @tênthànhviên) ---
-@bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ chấm công của 1 thành viên bất kỳ")
+@bot.tree.command(name="tracuu", description="[Admin] Tra cứu tổng giờ & lương chấm công của 1 thành viên")
 @app_commands.checks.has_permissions(administrator=True)
 async def tracuu(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        total_hours, user_records = get_user_total_hours(member.id)
+        total_hours, total_salary, user_records = get_user_total_hours(member.id)
 
         if not user_records:
             await interaction.followup.send(
@@ -291,10 +307,11 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
         embed.add_field(name="👤 Thành viên", value=member.mention, inline=True)
         embed.add_field(name="📅 Số buổi làm", value=f"`{len(user_records)} buổi`", inline=True)
         embed.add_field(name="⏳ TỔNG GIỜ LÀM", value=f"**{total_hours:.2f} giờ**", inline=False)
+        embed.add_field(name="💰 TỔNG LƯƠNG TẠM TÍNH", value=f"**{total_salary:,.0f} VNĐ**", inline=False)
 
         recent_str = ""
         for r in user_records[-3:]:
-            recent_str += f"• `{r.get('Ngày')}`: {r.get('Giờ On')} ➔ {r.get('Giờ Off')} (**{r.get('Tổng Giờ')}h**)\n"
+            recent_str += f"• `{r.get('Ngày')}`: {r.get('Giờ On')} ➔ {r.get('Giờ Off')} (**{r.get('Tổng Giờ')}h** | {r.get('Lương'):,.0f}đ)\n"
         
         embed.add_field(name="📝 Ca làm gần đây", value=recent_str or "Không có", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -303,7 +320,7 @@ async def tracuu(interaction: discord.Interaction, member: discord.Member):
         await interaction.followup.send(f"⚠️ Lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
 # --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop) ---
-@bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm của tất cả thành viên")
+@bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm và tiền lương")
 @app_commands.checks.has_permissions(administrator=True)
 async def tonghop(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -318,23 +335,26 @@ async def tonghop(interaction: discord.Interaction):
         sorted_summary = sorted(summary_data.values(), key=lambda x: x["total_hours"], reverse=True)
 
         embed = discord.Embed(
-            title="📋 BẢNG TỔNG HỢP GIỜ CHẤM CÔNG THÀNH VIÊN",
-            description=f"Cập nhật lúc: `{datetime.now(VN_TZ).strftime('%H:%M - %d/%m/%Y')}`",
+            title="📋 BẢNG TỔNG HỢP GIỜ & LƯƠNG THÀNH VIÊN",
+            description=f"Cập nhật lúc: `{datetime.now(VN_TZ).strftime('%H:%M - %d/%m/%Y')}`\nĐơn giá: `{HOURLY_RATE:,.0f} VNĐ/giờ`",
             color=discord.Color.gold()
         )
 
         grand_total_hours = 0.0
+        grand_total_salary = 0.0
         list_content = ""
 
         for idx, u_info in enumerate(sorted_summary, start=1):
             grand_total_hours += u_info["total_hours"]
-            list_content += f"**{idx}. {u_info['name']}**: `{u_info['total_hours']:.2f} giờ` ({u_info['count']} buổi)\n"
+            grand_total_salary += u_info["total_salary"]
+            list_content += f"**{idx}. {u_info['name']}**: `{u_info['total_hours']:.2f}h` ➔ **{u_info['total_salary']:,.0f} VNĐ** ({u_info['count']} buổi)\n"
 
         embed.add_field(name="👥 Danh sách chi tiết", value=list_content, inline=False)
         embed.add_field(
             name="📊 Thống kê chung", 
             value=f"• **Tổng số thành viên:** `{len(sorted_summary)} người`\n"
-                  f"• **Tổng cộng toàn máy chủ:** `{grand_total_hours:.2f} giờ`", 
+                  f"• **Tổng số giờ làm:** `{grand_total_hours:.2f} giờ`\n"
+                  f"• **TỔNG CHI PHÍ LƯƠNG:** **{grand_total_salary:,.0f} VNĐ**", 
             inline=False
         )
 

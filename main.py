@@ -18,8 +18,7 @@ VN_TZ = timezone(timedelta(hours=7))
 HOURLY_RATE = 15000
 
 # --- LƯU TRẠNG THÁI CA LÀM TRONG RAM ĐỂ TỐI ƯU TÀI NGUYÊN ---
-# Giúp không phải đọc Google Sheet liên tục khi không có ai hoạt động
-current_active_session = None  # Cấu trúc: {"user_id": ..., "gacha_id": ..., "name": ..., "start_time": ..., "timestamp": ..., "row_idx": ...}
+current_active_session = None
 
 # --- TẠO WEB SERVER ĐỂ CHẠY RENDER WEB SERVICE FREE ---
 class DummyServer(BaseHTTPRequestHandler):
@@ -30,7 +29,6 @@ class DummyServer(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot Discord is running!")
 
     def do_HEAD(self):
-        """Xử lý Ping từ UptimeRobot Free"""
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
@@ -59,7 +57,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- CÁC HÀM XỬ LÝ GOOGLE SHEET ---
 def sync_active_session_from_sheet():
-    """Chỉ gọi 1 lần khi khởi động bot hoặc khôi phục dữ liệu"""
     global current_active_session
     try:
         all_values = sheet.get_all_values()
@@ -91,7 +88,7 @@ def sync_active_session_from_sheet():
         print(f"Lỗi khi đồng bộ từ Sheet: {e}")
 
 def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, timestamp_start):
-    """Ghi nhận lượt báo Online mới vào Sheet"""
+    """Ghi nhận lượt báo Online mới vào Sheet và trả về index dòng mới"""
     sheet.append_row([
         str(user_id),       # A: User ID
         str(gacha_id),      # B: ID Gacha
@@ -104,13 +101,11 @@ def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, times
     ])
 
 def update_checkout_sheet(row_idx, end_time, hours, salary):
-    """Cập nhật Giờ Off, Tổng Giờ và Tổng Lương"""
     sheet.update_cell(row_idx, 6, end_time)
     sheet.update_cell(row_idx, 7, round(hours, 2))
     sheet.update_cell(row_idx, 8, round(salary))
 
 def get_user_total_hours(user_id):
-    """Tính tổng giờ làm và lương của 1 user"""
     all_values = sheet.get_all_values()
     total_hours = 0.0
     total_salary = 0.0
@@ -142,7 +137,6 @@ def get_user_total_hours(user_id):
     return round(total_hours, 2), round(total_salary), user_records
 
 def get_all_users_summary():
-    """Thống kê toàn bộ thành viên"""
     all_values = sheet.get_all_values()
     summary = {}
 
@@ -190,13 +184,12 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
 
     async def on_submit(self, interaction: discord.Interaction):
         global current_active_session
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer()
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
         gacha_id = self.gacha_input.value
 
-        # Kiểm tra nhanh từ RAM trước, không gọi Sheet
         if current_active_session is not None:
             if current_active_session["user_id"] == user_id:
                 await interaction.followup.send(
@@ -221,9 +214,9 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
         # Ghi vào Sheet
         await asyncio.to_thread(save_checkin_sheet, user_id, gacha_id, user_name, today_str, start_time_str, current_timestamp)
 
-        # Cập nhật bộ nhớ RAM
-        all_values = await asyncio.to_thread(sheet.get_all_values)
-        new_row_idx = len(all_values)
+        # Cập nhật cache RAM
+        all_rows = await asyncio.to_thread(sheet.get_all_values)
+        new_row_idx = len(all_rows)
 
         current_active_session = {
             "user_id": user_id,
@@ -235,8 +228,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
         }
 
         msg = await interaction.followup.send(
-            f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time_str}`! *(Tin nhắn tự xóa sau 10s)*", 
-            ephemeral=False
+            f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time_str}`! *(Tin nhắn tự xóa sau 10s)*"
         )
         await msg.delete(delay=10)
 
@@ -252,12 +244,11 @@ class TimekeepingView(ui.View):
     @ui.button(label="🔴 Báo Offline", style=discord.ButtonStyle.danger, custom_id="btn_checkout")
     async def checkout_button(self, interaction: discord.Interaction, button: ui.Button):
         global current_active_session
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer()
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
 
-        # Kiểm tra nhanh từ RAM
         if current_active_session is None or current_active_session["user_id"] != user_id:
             await interaction.followup.send(
                 "⚠️ Bạn chưa báo Online (hoặc ca làm đang thuộc về người khác) nên không thể báo Offline!", 
@@ -279,16 +270,13 @@ class TimekeepingView(ui.View):
 
         try:
             await asyncio.to_thread(update_checkout_sheet, row_idx, end_time_str, hours, salary)
-            
-            # Giải phóng RAM sau khi báo Offline thành công
             current_active_session = None
 
             msg = await interaction.followup.send(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time_str}` (Bắt đầu: `{start_display}`).\n"
                 f"⏳ **Thời gian làm:** `{hours:.2f} giờ` ({int(elapsed_seconds//60)} phút).\n"
                 f"💵 **Lương ca này:** `{salary:,.0f} IC`\n"
-                f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*",
-                ephemeral=False
+                f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*"
             )
             await msg.delete(delay=10)
         except Exception as e:
@@ -299,7 +287,6 @@ class TimekeepingView(ui.View):
 
     @ui.button(label="👀 Ai đang Online?", style=discord.ButtonStyle.secondary, custom_id="btn_who_online")
     async def who_online_button(self, interaction: discord.Interaction, button: ui.Button):
-        # Trả lời tức thì từ RAM, không cần defer hay đụng vào Google Sheet
         if current_active_session is None:
             await interaction.response.send_message("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
         else:
@@ -414,7 +401,6 @@ async def tonghop(interaction: discord.Interaction):
 async def on_ready():
     bot.add_view(TimekeepingView())
     await bot.tree.sync()
-    # Khôi phục trạng thái ca đang Online từ Google Sheet (chỉ quét 1 lần duy nhất)
     await asyncio.to_thread(sync_active_session_from_sheet)
     print(f"Bot {bot.user.name} đã kết nối và đồng bộ thành công!")
 

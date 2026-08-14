@@ -17,7 +17,7 @@ VN_TZ = timezone(timedelta(hours=7))
 # Mức lương cố định / 1 giờ (Đơn vị IC)
 HOURLY_RATE = 15000
 
-# --- TẠO WEB SERVER ĐỂ CHẠY RENDER WEB SERVICE FREE ---
+# --- TẠO WEB SERVER ĐỂ GIỮ RENDER KHÔNG BỊ NGỦ ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -37,9 +37,8 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- HÀM KẾT NỐI VÀ TỰ ĐỘNG LÀM MỚI TOKEN GOOGLE SHEETS ---
+# --- HÀM LÀM MỚI KẾT NỐI GOOGLE SHEETS ---
 def get_sheet():
-    """Tự động làm mới kết nối Google Sheet để tránh bị hết hạn sau nhiều ngày"""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
@@ -55,7 +54,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- CÁC HÀM XỬ LÝ DỮ LIỆU ---
 def sync_active_session_from_sheet():
-    """Kiểm tra ca làm đang ON trực tiếp từ Sheet"""
     try:
         sh = get_sheet()
         all_values = sh.get_all_values()
@@ -85,7 +83,7 @@ def sync_active_session_from_sheet():
                 }
         return None
     except Exception as e:
-        print(f"Lỗi khi đọc Active Session: {e}")
+        print(f"Lỗi sync_active_session_from_sheet: {e}")
         return None
 
 def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, timestamp_start):
@@ -224,7 +222,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
             )
             await msg.delete(delay=10)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Lỗi kết nối Google Sheet: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Lỗi: {e}", ephemeral=True)
 
 # --- BẢNG ĐIỀU KHIỂN NÚT BẤM ---
 class TimekeepingView(ui.View):
@@ -274,7 +272,7 @@ class TimekeepingView(ui.View):
             )
             await msg.delete(delay=10)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Lỗi khi cập nhật Google Sheet: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Lỗi cập nhật Sheet: {e}", ephemeral=True)
 
     @ui.button(label="👀 Ai đang Online?", style=discord.ButtonStyle.secondary, custom_id="btn_who_online")
     async def who_online_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -349,9 +347,8 @@ async def tracuu(interaction: discord.Interaction, member: Optional[discord.Memb
     except Exception as e:
         await interaction.followup.send(f"⚠️ Lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
-# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop - Dành cho Admin) ---
-@bot.tree.command(name="tonghop", description="[Admin] Báo cáo tổng hợp toàn bộ giờ làm và tiền lương")
-@app_commands.checks.has_permissions(administrator=True)
+# --- LỆNH TỔNG HỢP TOÀN BỘ THÀNH VIÊN (/tonghop) ---
+@bot.tree.command(name="tonghop", description="Báo cáo tổng hợp toàn bộ giờ làm và tiền lương")
 async def tonghop(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
@@ -391,13 +388,28 @@ async def tonghop(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Đã xảy ra lỗi khi tổng hợp dữ liệu: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Lỗi khi tổng hợp dữ liệu: {e}", ephemeral=True)
+
+# --- BỘ BẮT LỖI TOÀN CỤC (TRÁNH BỊ TREO LỆNH) ---
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    print(f"Lỗi App Command: {error}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(f"⚠️ Có lỗi xảy ra: `{error}`", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ Có lỗi xảy ra: `{error}`", ephemeral=True)
+    except Exception:
+        pass
 
 # --- SỰ KIỆN KHỞI ĐỘNG BOT ---
 @bot.event
 async def on_ready():
     bot.add_view(TimekeepingView())
-    await bot.tree.sync()
+    try:
+        await bot.tree.sync()
+    except Exception as e:
+        print(f"Lỗi sync tree: {e}")
     print(f"Bot {bot.user.name} đã kết nối và đồng bộ thành công!")
 
 token = os.getenv("DISCORD_TOKEN")

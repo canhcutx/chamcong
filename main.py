@@ -37,14 +37,13 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- KẾT NỐI GOOGLE SHEETS BẰNG GOOGLE-AUTH CHÍNH THỨC ---
+# --- KẾT NỐI GOOGLE SHEETS BẰNG GOOGLE-AUTH ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
 def get_sheet():
-    """Tạo kết nối mới và có Timeout an toàn tránh bị treo"""
     creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
     client = gspread.authorize(creds)
     return client.open("Mechanic2.0").worksheet("Chấm công NPC")

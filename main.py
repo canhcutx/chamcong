@@ -17,6 +17,10 @@ VN_TZ = timezone(timedelta(hours=7))
 # Mức lương cố định / 1 giờ (Đơn vị IC)
 HOURLY_RATE = 15000
 
+# ID GOOGLE SHEET CỦA BẠN
+SPREADSHEET_ID = "1yI1MyXOzw2QSvMLxBx3LRVIlGVYVznxhsoxAUSkjhUc"
+WORKSHEET_NAME = "Chấm công NPC"
+
 # --- TẠO WEB SERVER ĐỂ GIỮ RENDER KHÔNG BỊ NGỦ ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -37,16 +41,27 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- KẾT NỐI GOOGLE SHEETS BẰNG GOOGLE-AUTH ---
+# --- KHỞI TẠO KẾT NỐI GOOGLE SHEETS BẰNG ID BẢNG TÍNH TRỰC TIẾP ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-def get_sheet():
-    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-    client = gspread.authorize(creds)
-    return client.open("Mechanic2.0").worksheet("Chấm công NPC")
+creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+gc = gspread.authorize(creds)
+
+def get_worksheet():
+    """Mở worksheet bằng Spreadsheet ID trực tiếp"""
+    global gc, creds
+    try:
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        return sh.worksheet(WORKSHEET_NAME)
+    except Exception:
+        # Nếu token hết hạn, cấp mới lại kết nối
+        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        return sh.worksheet(WORKSHEET_NAME)
 
 # --- CẤU HÌNH BOT DISCORD ---
 intents = discord.Intents.default()
@@ -55,8 +70,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- CÁC HÀM XỬ LÝ DỮ LIỆU ---
 def sync_active_session_from_sheet():
-    sh = get_sheet()
-    all_values = sh.get_all_values()
+    ws = get_worksheet()
+    all_values = ws.get_all_values()
     if len(all_values) <= 1:
         return None
 
@@ -84,8 +99,8 @@ def sync_active_session_from_sheet():
     return None
 
 def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, timestamp_start):
-    sh = get_sheet()
-    sh.append_row([
+    ws = get_worksheet()
+    ws.append_row([
         str(user_id),
         str(gacha_id),
         user_name,
@@ -97,14 +112,14 @@ def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, times
     ])
 
 def update_checkout_sheet(row_idx, end_time, hours, salary):
-    sh = get_sheet()
-    sh.update_cell(row_idx, 6, end_time)
-    sh.update_cell(row_idx, 7, round(hours, 2))
-    sh.update_cell(row_idx, 8, round(salary))
+    ws = get_worksheet()
+    ws.update_cell(row_idx, 6, end_time)
+    ws.update_cell(row_idx, 7, round(hours, 2))
+    ws.update_cell(row_idx, 8, round(salary))
 
 def get_user_total_hours(user_id):
-    sh = get_sheet()
-    all_values = sh.get_all_values()
+    ws = get_worksheet()
+    all_values = ws.get_all_values()
     total_hours = 0.0
     total_salary = 0.0
     user_records = []
@@ -135,8 +150,8 @@ def get_user_total_hours(user_id):
     return round(total_hours, 2), round(total_salary), user_records
 
 def get_all_users_summary():
-    sh = get_sheet()
-    all_values = sh.get_all_values()
+    ws = get_worksheet()
+    all_values = ws.get_all_values()
     summary = {}
 
     if len(all_values) > 1:
@@ -189,7 +204,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
         gacha_id = self.gacha_input.value
 
         try:
-            active_sess = await asyncio.wait_for(asyncio.to_thread(sync_active_session_from_sheet), timeout=15.0)
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
 
             if active_sess is not None:
                 if active_sess["user_id"] == user_id:
@@ -212,17 +227,12 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
             start_time_str = now_vn.strftime("%H:%M")
             current_timestamp = int(time.time())
 
-            await asyncio.wait_for(
-                asyncio.to_thread(save_checkin_sheet, user_id, gacha_id, user_name, today_str, start_time_str, current_timestamp),
-                timeout=15.0
-            )
+            await asyncio.to_thread(save_checkin_sheet, user_id, gacha_id, user_name, today_str, start_time_str, current_timestamp)
 
             msg = await interaction.followup.send(
                 f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time_str}`! *(Tin nhắn tự xóa sau 10s)*"
             )
             await msg.delete(delay=10)
-        except asyncio.TimeoutError:
-            await interaction.followup.send("⚠️ Lỗi kết nối: Google Sheet phản hồi quá lâu (Timeout). Vui lòng thử lại!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"⚠️ Lỗi: {e}", ephemeral=True)
 
@@ -243,7 +253,7 @@ class TimekeepingView(ui.View):
         user_name = interaction.user.display_name
 
         try:
-            active_sess = await asyncio.wait_for(asyncio.to_thread(sync_active_session_from_sheet), timeout=15.0)
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
 
             if active_sess is None or active_sess["user_id"] != user_id:
                 await interaction.followup.send(
@@ -264,10 +274,7 @@ class TimekeepingView(ui.View):
             hours = elapsed_seconds / 3600.0
             salary = hours * HOURLY_RATE
 
-            await asyncio.wait_for(
-                asyncio.to_thread(update_checkout_sheet, row_idx, end_time_str, hours, salary),
-                timeout=15.0
-            )
+            await asyncio.to_thread(update_checkout_sheet, row_idx, end_time_str, hours, salary)
 
             msg = await interaction.followup.send(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time_str}` (Bắt đầu: `{start_display}`).\n"
@@ -276,8 +283,6 @@ class TimekeepingView(ui.View):
                 f"📊 *Dữ liệu đã được lưu vào Google Sheet! (Tin nhắn tự xóa sau 10s)*"
             )
             await msg.delete(delay=10)
-        except asyncio.TimeoutError:
-            await interaction.followup.send("⚠️ Lỗi kết nối: Google Sheet phản hồi quá lâu (Timeout). Vui lòng thử lại!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"⚠️ Lỗi cập nhật Sheet: {e}", ephemeral=True)
 
@@ -285,7 +290,7 @@ class TimekeepingView(ui.View):
     async def who_online_button(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            active_sess = await asyncio.wait_for(asyncio.to_thread(sync_active_session_from_sheet), timeout=15.0)
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
             
             if active_sess is None:
                 await interaction.followup.send("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
@@ -295,10 +300,8 @@ class TimekeepingView(ui.View):
                 start_display = active_sess["start_time"]
                 msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_display}`"
                 await interaction.followup.send(msg, ephemeral=True)
-        except asyncio.TimeoutError:
-            await interaction.followup.send("⚠️ Lỗi kết nối Google Sheet (Timeout). Vui lòng thử lại sau vài giây!", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Lỗi kết nối: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Lỗi: {e}", ephemeral=True)
 
 # --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
 @bot.command()
@@ -325,10 +328,7 @@ async def tracuu(interaction: discord.Interaction, member: Optional[discord.Memb
     target_member = member if member is not None else interaction.user
 
     try:
-        total_hours, total_salary, user_records = await asyncio.wait_for(
-            asyncio.to_thread(get_user_total_hours, target_member.id),
-            timeout=15.0
-        )
+        total_hours, total_salary, user_records = await asyncio.to_thread(get_user_total_hours, target_member.id)
 
         if not user_records:
             await interaction.followup.send(
@@ -356,8 +356,6 @@ async def tracuu(interaction: discord.Interaction, member: Optional[discord.Memb
         embed.add_field(name="📝 Ca làm gần đây", value=recent_str or "Không có", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ Lỗi: Google Sheet phản hồi quá lâu. Vui lòng thử lại!", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Lỗi khi đọc Google Sheet: {e}", ephemeral=True)
 
@@ -367,7 +365,7 @@ async def tonghop(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        summary_data = await asyncio.wait_for(asyncio.to_thread(get_all_users_summary), timeout=15.0)
+        summary_data = await asyncio.to_thread(get_all_users_summary)
 
         if not summary_data:
             await interaction.followup.send("❌ Dữ liệu trên Google Sheet hiện đang trống.", ephemeral=True)
@@ -401,8 +399,6 @@ async def tonghop(interaction: discord.Interaction):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ Lỗi: Google Sheet phản hồi quá lâu. Vui lòng thử lại!", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Lỗi khi tổng hợp dữ liệu: {e}", ephemeral=True)
 

@@ -17,8 +17,6 @@ VN_TZ = timezone(timedelta(hours=7))
 # Mức lương cố định / 1 giờ (Đơn vị IC)
 HOURLY_RATE = 15000
 
-current_active_session = None
-
 # --- TẠO WEB SERVER ĐỂ CHẠY RENDER WEB SERVICE FREE ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -39,28 +37,29 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- KẾT NỐI GOOGLE SHEETS ---
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
-sheet = client.open("Mechanic2.0").worksheet("Chấm công NPC")
+# --- HÀM KẾT NỐI VÀ TỰ ĐỘNG LÀM MỚI TOKEN GOOGLE SHEETS ---
+def get_sheet():
+    """Tự động làm mới kết nối Google Sheet để tránh bị hết hạn sau nhiều ngày"""
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    return client.open("Mechanic2.0").worksheet("Chấm công NPC")
 
 # --- CẤU HÌNH BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- CÁC HÀM XỬ LÝ GOOGLE SHEET ---
+# --- CÁC HÀM XỬ LÝ DỮ LIỆU ---
 def sync_active_session_from_sheet():
-    global current_active_session
+    """Kiểm tra ca làm đang ON trực tiếp từ Sheet"""
     try:
-        all_values = sheet.get_all_values()
+        sh = get_sheet()
+        all_values = sh.get_all_values()
         if len(all_values) <= 1:
-            current_active_session = None
             return None
 
         for idx, row in enumerate(all_values[1:], start=2):
@@ -68,12 +67,15 @@ def sync_active_session_from_sheet():
                 raw_start = str(row[4])
                 if "|" in raw_start:
                     start_display, start_ts = raw_start.split("|")
-                    timestamp = int(start_ts)
+                    try:
+                        timestamp = int(start_ts)
+                    except ValueError:
+                        timestamp = int(time.time())
                 else:
                     start_display = raw_start
                     timestamp = int(time.time())
 
-                current_active_session = {
+                return {
                     "user_id": str(row[0]),
                     "gacha_id": str(row[1]) if len(row) >= 2 else "N/A",
                     "name": str(row[2]) if len(row) >= 3 else "Thành viên",
@@ -81,32 +83,33 @@ def sync_active_session_from_sheet():
                     "timestamp": timestamp,
                     "row_idx": idx
                 }
-                return current_active_session
-        current_active_session = None
         return None
     except Exception as e:
-        print(f"Lỗi khi đồng bộ từ Sheet: {e}")
+        print(f"Lỗi khi đọc Active Session: {e}")
         return None
 
 def save_checkin_sheet(user_id, gacha_id, user_name, date_str, start_time, timestamp_start):
-    sheet.append_row([
-        str(user_id),       # A: User ID
-        str(gacha_id),      # B: ID Gacha
-        user_name,          # C: Tên
-        date_str,           # D: Ngày
-        f"{start_time}|{timestamp_start}", # E: Giờ On
-        "ON",               # F: Giờ Off
-        0,                  # G: Tổng Giờ
-        0                   # H: Tổng Lương
+    sh = get_sheet()
+    sh.append_row([
+        str(user_id),
+        str(gacha_id),
+        user_name,
+        date_str,
+        f"{start_time}|{timestamp_start}",
+        "ON",
+        0,
+        0
     ])
 
 def update_checkout_sheet(row_idx, end_time, hours, salary):
-    sheet.update_cell(row_idx, 6, end_time)
-    sheet.update_cell(row_idx, 7, round(hours, 2))
-    sheet.update_cell(row_idx, 8, round(salary))
+    sh = get_sheet()
+    sh.update_cell(row_idx, 6, end_time)
+    sh.update_cell(row_idx, 7, round(hours, 2))
+    sh.update_cell(row_idx, 8, round(salary))
 
 def get_user_total_hours(user_id):
-    all_values = sheet.get_all_values()
+    sh = get_sheet()
+    all_values = sh.get_all_values()
     total_hours = 0.0
     total_salary = 0.0
     user_records = []
@@ -137,7 +140,8 @@ def get_user_total_hours(user_id):
     return round(total_hours, 2), round(total_salary), user_records
 
 def get_all_users_summary():
-    all_values = sheet.get_all_values()
+    sh = get_sheet()
+    all_values = sh.get_all_values()
     summary = {}
 
     if len(all_values) > 1:
@@ -183,43 +187,44 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
     gacha_input = ui.TextInput(label="ID Gacha", placeholder="Nhập ID Gacha của bạn...")
 
     async def on_submit(self, interaction: discord.Interaction):
-        global current_active_session
         await interaction.response.defer()
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
         gacha_id = self.gacha_input.value
 
-        active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
+        try:
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
 
-        if active_sess is not None:
-            if active_sess["user_id"] == user_id:
+            if active_sess is not None:
+                if active_sess["user_id"] == user_id:
+                    await interaction.followup.send(
+                        f"⚠️ Bạn đã báo Online rồi (lúc `{active_sess['start_time']}`). Hãy báo Offline trước khi check-in lại!",
+                        ephemeral=True
+                    )
+                    return
+
                 await interaction.followup.send(
-                    f"⚠️ Bạn đã báo Online rồi (lúc `{active_sess['start_time']}`). Hãy báo Offline trước khi check-in lại!",
+                    f"❌ **Khung giờ này đã có người làm việc!**\n"
+                    f"👤 **{active_sess['name']}** đang online từ lúc `{active_sess['start_time']}`.\n"
+                    f"Bạn không thể báo Online cho tới khi ca hiện tại kết thúc.",
                     ephemeral=True
                 )
                 return
 
-            await interaction.followup.send(
-                f"❌ **Khung giờ này đã có người làm việc!**\n"
-                f"👤 **{active_sess['name']}** đang online từ lúc `{active_sess['start_time']}`.\n"
-                f"Bạn không thể báo Online cho tới khi ca hiện tại kết thúc.",
-                ephemeral=True
+            now_vn = datetime.now(VN_TZ)
+            today_str = now_vn.strftime("%Y-%m-%d")
+            start_time_str = now_vn.strftime("%H:%M")
+            current_timestamp = int(time.time())
+
+            await asyncio.to_thread(save_checkin_sheet, user_id, gacha_id, user_name, today_str, start_time_str, current_timestamp)
+
+            msg = await interaction.followup.send(
+                f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time_str}`! *(Tin nhắn tự xóa sau 10s)*"
             )
-            return
-
-        now_vn = datetime.now(VN_TZ)
-        today_str = now_vn.strftime("%Y-%m-%d")
-        start_time_str = now_vn.strftime("%H:%M")
-        current_timestamp = int(time.time())
-
-        await asyncio.to_thread(save_checkin_sheet, user_id, gacha_id, user_name, today_str, start_time_str, current_timestamp)
-        await asyncio.to_thread(sync_active_session_from_sheet)
-
-        msg = await interaction.followup.send(
-            f"✅ **{user_name}** (ID Gacha: `{gacha_id}`) đã báo Online lúc `{start_time_str}`! *(Tin nhắn tự xóa sau 10s)*"
-        )
-        await msg.delete(delay=10)
+            await msg.delete(delay=10)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Lỗi kết nối Google Sheet: {e}", ephemeral=True)
 
 # --- BẢNG ĐIỀU KHIỂN NÚT BẤM ---
 class TimekeepingView(ui.View):
@@ -232,36 +237,34 @@ class TimekeepingView(ui.View):
 
     @ui.button(label="🔴 Báo Offline", style=discord.ButtonStyle.danger, custom_id="btn_checkout")
     async def checkout_button(self, interaction: discord.Interaction, button: ui.Button):
-        global current_active_session
         await interaction.response.defer()
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
 
-        active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
-
-        if active_sess is None or active_sess["user_id"] != user_id:
-            await interaction.followup.send(
-                "⚠️ Bạn chưa báo Online (hoặc ca làm đang thuộc về người khác) nên không thể báo Offline!", 
-                ephemeral=True
-            )
-            return
-
-        now_vn = datetime.now(VN_TZ)
-        end_time_str = now_vn.strftime("%H:%M")
-        current_timestamp = int(time.time())
-
-        start_display = active_sess["start_time"]
-        start_timestamp = active_sess["timestamp"]
-        row_idx = active_sess["row_idx"]
-
-        elapsed_seconds = max(0, current_timestamp - start_timestamp)
-        hours = elapsed_seconds / 3600.0
-        salary = hours * HOURLY_RATE
-
         try:
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
+
+            if active_sess is None or active_sess["user_id"] != user_id:
+                await interaction.followup.send(
+                    "⚠️ Bạn chưa báo Online (hoặc ca làm đang thuộc về người khác) nên không thể báo Offline!", 
+                    ephemeral=True
+                )
+                return
+
+            now_vn = datetime.now(VN_TZ)
+            end_time_str = now_vn.strftime("%H:%M")
+            current_timestamp = int(time.time())
+
+            start_display = active_sess["start_time"]
+            start_timestamp = active_sess["timestamp"]
+            row_idx = active_sess["row_idx"]
+
+            elapsed_seconds = max(0, current_timestamp - start_timestamp)
+            hours = elapsed_seconds / 3600.0
+            salary = hours * HOURLY_RATE
+
             await asyncio.to_thread(update_checkout_sheet, row_idx, end_time_str, hours, salary)
-            current_active_session = None
 
             msg = await interaction.followup.send(
                 f"📝 **{user_name}** đã báo Offline lúc `{end_time_str}` (Bắt đầu: `{start_display}`).\n"
@@ -271,24 +274,24 @@ class TimekeepingView(ui.View):
             )
             await msg.delete(delay=10)
         except Exception as e:
-            await interaction.followup.send(
-                f"⚠️ Lỗi khi cập nhật Google Sheet: {e}",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"⚠️ Lỗi khi cập nhật Google Sheet: {e}", ephemeral=True)
 
     @ui.button(label="👀 Ai đang Online?", style=discord.ButtonStyle.secondary, custom_id="btn_who_online")
     async def who_online_button(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer(ephemeral=True)
-        active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
-        
-        if active_sess is None:
-            await interaction.followup.send("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
-        else:
-            name = active_sess["name"]
-            gacha_id = active_sess["gacha_id"]
-            start_display = active_sess["start_time"]
-            msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_display}`"
-            await interaction.followup.send(msg, ephemeral=True)
+        try:
+            active_sess = await asyncio.to_thread(sync_active_session_from_sheet)
+            
+            if active_sess is None:
+                await interaction.followup.send("🟢 Hiện tại **không có ai** đang trong ca làm việc.", ephemeral=True)
+            else:
+                name = active_sess["name"]
+                gacha_id = active_sess["gacha_id"]
+                start_display = active_sess["start_time"]
+                msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_display}`"
+                await interaction.followup.send(msg, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Lỗi kết nối: {e}", ephemeral=True)
 
 # --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
 @bot.command()
@@ -395,7 +398,6 @@ async def tonghop(interaction: discord.Interaction):
 async def on_ready():
     bot.add_view(TimekeepingView())
     await bot.tree.sync()
-    await asyncio.to_thread(sync_active_session_from_sheet)
     print(f"Bot {bot.user.name} đã kết nối và đồng bộ thành công!")
 
 token = os.getenv("DISCORD_TOKEN")

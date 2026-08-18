@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import threading
+import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord.ext import commands
@@ -11,23 +12,26 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+# Ngăn treo kết nối mạng
+socket.setdefaulttimeout(10.0)
+
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
 
 # Mức lương cố định / 1 giờ (Đơn vị IC)
 HOURLY_RATE = 15000
 
-# ID GOOGLE SHEET CỦA BẠN
+# ID GOOGLE SHEET
 SPREADSHEET_ID = "1yI1MyXOzw2QSvMLxBx3LRVIlGVYVznxhsoxAUSkjhUc"
 WORKSHEET_NAME = "Chấm công NPC"
 
-# --- TẠO WEB SERVER ĐỂ GIỮ RENDER KHÔNG BỊ NGỦ ---
+# --- WEB SERVER GIỮ BOT THỨC ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"Bot Discord is running!")
+        self.wfile.write(b"Bot is running!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -41,29 +45,19 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- KHỞI TẠO KẾT NỐI GOOGLE SHEETS BẰNG ID BẢNG TÍNH TRỰC TIẾP ---
+# --- KẾT NỐI GOOGLE SHEETS ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-gc = gspread.authorize(creds)
-
 def get_worksheet():
-    """Mở worksheet bằng Spreadsheet ID trực tiếp"""
-    global gc, creds
-    try:
-        sh = gc.open_by_key(SPREADSHEET_ID)
-        return sh.worksheet(WORKSHEET_NAME)
-    except Exception:
-        # Nếu token hết hạn, cấp mới lại kết nối
-        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_key(SPREADSHEET_ID)
-        return sh.worksheet(WORKSHEET_NAME)
+    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    return sh.worksheet(WORKSHEET_NAME)
 
-# --- CẤU HÌNH BOT DISCORD ---
+# --- CẤU HÌNH BOT ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -197,7 +191,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
     gacha_input = ui.TextInput(label="ID Gacha", placeholder="Nhập ID Gacha của bạn...")
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=False)
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
@@ -247,7 +241,7 @@ class TimekeepingView(ui.View):
 
     @ui.button(label="🔴 Báo Offline", style=discord.ButtonStyle.danger, custom_id="btn_checkout")
     async def checkout_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=False)
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
@@ -297,11 +291,11 @@ class TimekeepingView(ui.View):
             else:
                 name = active_sess["name"]
                 gacha_id = active_sess["gacha_id"]
-                start_display = active_sess["start_time"]
-                msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_display}`"
+                start_time = active_sess["start_time"]
+                msg = f"📌 **Hiện tại đang Online:** 👤 **{name}** (ID Gacha: `{gacha_id}`) - Bắt đầu lúc `{start_time}`"
                 await interaction.followup.send(msg, ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Lỗi: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Lỗi đọc trạng thái: {e}", ephemeral=True)
 
 # --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
 @bot.command()

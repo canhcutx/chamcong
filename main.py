@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-# Ngăn treo kết nối mạng
+# Ngăn treo socket mạng
 socket.setdefaulttimeout(10.0)
 
 # Múi giờ Việt Nam (UTC+7)
@@ -25,7 +25,7 @@ HOURLY_RATE = 15000
 SPREADSHEET_ID = "1yI1MyXOzw2QSvMLxBx3LRVIlGVYVznxhsoxAUSkjhUc"
 WORKSHEET_NAME = "Chấm công NPC"
 
-# --- WEB SERVER GIỮ BOT THỨC ---
+# --- WEB SERVER GIỮ RENDER THỨC ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -57,7 +57,7 @@ def get_worksheet():
     sh = gc.open_by_key(SPREADSHEET_ID)
     return sh.worksheet(WORKSHEET_NAME)
 
-# --- CẤU HÌNH BOT ---
+# --- CẤU HÌNH BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -228,7 +228,7 @@ class CheckInModal(ui.Modal, title="Báo giờ Online (Tự động)"):
             )
             await msg.delete(delay=10)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Lỗi: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Lỗi kết nối Google Sheet: {e}", ephemeral=True)
 
 # --- BẢNG ĐIỀU KHIỂN NÚT BẤM ---
 class TimekeepingView(ui.View):
@@ -297,11 +297,8 @@ class TimekeepingView(ui.View):
         except Exception as e:
             await interaction.followup.send(f"⚠️ Lỗi đọc trạng thái: {e}", ephemeral=True)
 
-# --- LỆNH TẠO BẢNG ĐIỀU KHIỂN CHẤM CÔNG ---
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setup_bot(ctx):
-    embed = discord.Embed(
+def create_dashboard_embed():
+    return discord.Embed(
         title="⏰ BẢNG CHẤM CÔNG VÀ QUẢN LÝ CA LÀM",
         description=(
             f"• Lương cơ bản: **{HOURLY_RATE:,.0f} IC / 1 giờ**\n"
@@ -311,9 +308,18 @@ async def setup_bot(ctx):
         ),
         color=discord.Color.blue()
     )
-    await ctx.send(embed=embed, view=TimekeepingView())
 
-# --- LỆNH TRA CỨU (/tracuu HOẶC /tracuu @tênngườidùng) ---
+# --- LỆNH TEXT: !setup_bot ---
+@bot.command()
+async def setup_bot(ctx):
+    await ctx.send(embed=create_dashboard_embed(), view=TimekeepingView())
+
+# --- LỆNH SLASH: /setup_bot (Dự phòng trường hợp chưa mở quyền message content) ---
+@bot.tree.command(name="setup_bot", description="Tạo bảng chấm công và quản lý ca làm việc")
+async def slash_setup_bot(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=create_dashboard_embed(), view=TimekeepingView())
+
+# --- LỆNH TRA CỨU (/tracuu) ---
 @bot.tree.command(name="tracuu", description="Tra cứu tổng giờ & lương chấm công của bản thân hoặc 1 thành viên")
 @app_commands.describe(member="[Tùy chọn] Chọn thành viên cần tra cứu (để trống để tự tra cứu bản thân)")
 async def tracuu(interaction: discord.Interaction, member: Optional[discord.Member] = None):

@@ -25,6 +25,9 @@ HOURLY_RATE = 15000
 SPREADSHEET_ID = "1yI1MyXOzw2QSvMLxBx3LRVIlGVYVznxhsoxAUSkjhUc"
 WORKSHEET_NAME = "Chấm công NPC"
 
+# Tự động nhận diện đường dẫn Secret File trên Render
+CRED_PATH = "/etc/secrets/credentials.json" if os.path.exists("/etc/secrets/credentials.json") else "credentials.json"
+
 # --- WEB SERVER GIỮ RENDER THỨC ---
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -52,7 +55,7 @@ SCOPES = [
 ]
 
 def get_worksheet():
-    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+    creds = Credentials.from_service_account_file(CRED_PATH, scopes=SCOPES)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
     return sh.worksheet(WORKSHEET_NAME)
@@ -314,7 +317,7 @@ def create_dashboard_embed():
 async def setup_bot(ctx):
     await ctx.send(embed=create_dashboard_embed(), view=TimekeepingView())
 
-# --- LỆNH SLASH: /setup_bot (Dự phòng trường hợp chưa mở quyền message content) ---
+# --- LỆNH SLASH: /setup_bot ---
 @bot.tree.command(name="setup_bot", description="Tạo bảng chấm công và quản lý ca làm việc")
 async def slash_setup_bot(interaction: discord.Interaction):
     await interaction.response.send_message(embed=create_dashboard_embed(), view=TimekeepingView())
